@@ -9,7 +9,8 @@ namespace WinThumbsPreloader
     {
         private string path;
         private bool includeNestedDirectories;
-        List<string> filesList = new List<string>();
+        // Removed the class-level 'filesList' to prevent memory bloat
+        
         string[] thumbnailExtensions = ThumbnailExtensions();
 
         public DirectoryScanner(string path, bool includeNestedDirectories)
@@ -21,79 +22,88 @@ namespace WinThumbsPreloader
         public static string[] ThumbnailExtensions()
         {
             string[] defaultExtensions = { "avif", "bmp", "gif", "heic", "jpg", "jpeg", "mkv", "mov", "mp4", "png", "svg", "tif", "tiff", "webp" };
-            string[] thumbnailExtensions;
+            string[] extensions;
             try
             {
-                thumbnailExtensions = File.ReadAllLines("ThumbnailExtensions.txt")
-                                          .SelectMany(line => line.Split(new[] { ',', ' ' }, StringSplitOptions.RemoveEmptyEntries)) //Ignore commas and spaces between extensions written on one line
-                                          .Where(ext => !string.IsNullOrWhiteSpace(ext)) //Ignore blank lines or lines with only spaces
-                                          .Select(ext => ext.Trim(' ')).ToArray(); //Ignore spaces after the extension for each line
-                if (thumbnailExtensions == null)
+                extensions = File.ReadAllLines("ThumbnailExtensions.txt")
+                                          .SelectMany(line => line.Split(new[] { ',', ' ' }, StringSplitOptions.RemoveEmptyEntries))
+                                          .Where(ext => !string.IsNullOrWhiteSpace(ext))
+                                          .Select(ext => ext.Trim(' ')).ToArray();
+                if (extensions == null || extensions.Length == 0)
                 {
-                    thumbnailExtensions = defaultExtensions;
+                    extensions = defaultExtensions;
                 }
             }
-            catch (FileNotFoundException)
+            catch (Exception)
             {
-                thumbnailExtensions = defaultExtensions;
+                extensions = defaultExtensions;
             }
-            return thumbnailExtensions;
+            return extensions;
         }
 
-        public IEnumerable<Tuple<int, List<string>>> GetItemsCount()
+        // Changed return type to simply yield strings one by one
+        public IEnumerable<string> GetFiles()
         {
-            if (includeNestedDirectories)
-            {
-                foreach (Tuple<int, List<string>> itemsCount in GetItemsCountNested()) yield return itemsCount;
-            }
-            else
-            {
-                foreach (Tuple<int, List<string>> itemsCount in GetItemsCountOnlyFirstLevel()) yield return itemsCount;
-            }
+            var options = includeNestedDirectories ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly;
+            
+            // Use EnumerateFiles for lazy evaluation (starts yielding immediately)
+            // Note: EnumerateFiles can fail on permission errors if not handled carefully. 
+            // Since we need robustness, we often have to do a custom recursive enumerate to catch access denied exceptions.
+            return SafeEnumerateFiles(path, includeNestedDirectories);
         }
 
-        private IEnumerable<Tuple<int, List<string>>> GetItemsCountOnlyFirstLevel()
+        private IEnumerable<string> SafeEnumerateFiles(string rootPath, bool recursive)
         {
-            try
-            {
-                foreach (string file in Directory.EnumerateFiles(currentPath)
-                {
-                    if (thumbnailExtensions.Contains(new FileInfo(file).Extension.TrimStart('.'), StringComparer.OrdinalIgnoreCase))
-                    {
-                        filesList.Add(file);
-                    }
-                }
-            }
-            catch (Exception) {  } // Do nothing
-           if (filesList.Count > 0) yield return new Tuple<int, List<string>>(filesList.Count, filesList);
-        }
+            Queue<string> dirs = new Queue<string>();
+            dirs.Enqueue(rootPath);
 
-        private IEnumerable<Tuple<int, List<string>>> GetItemsCountNested()
-        {
-            Queue<string> queue = new Queue<string>();
-            queue.Enqueue(path);
-            string currentPath;
-            while (queue.Count > 0)
+            while (dirs.Count > 0)
             {
-                currentPath = queue.Dequeue();
+                string currentDir = dirs.Dequeue();
+                
+                // 1. Process Files in current directory
+                IEnumerable<string> files = null;
                 try
                 {
-                    foreach (string subDir in Directory.GetDirectories(currentPath))
+                    files = Directory.EnumerateFiles(currentDir);
+                }
+                catch (UnauthorizedAccessException) { continue; }
+                catch (DirectoryNotFoundException) { continue; }
+                catch (Exception) { continue; }
+
+                if (files != null)
+                {
+                    foreach (string file in files)
                     {
-                        queue.Enqueue(subDir);
-                    }
-                    foreach (string subFiles in Directory.EnumerateFiles(currentPath))
-                    {
-                        if (thumbnailExtensions.Contains(new FileInfo(subFiles).Extension.TrimStart('.'), StringComparer.OrdinalIgnoreCase) || thumbnailExtensions.Length == 0)
+                        string ext = "";
+                        try { ext = Path.GetExtension(file).TrimStart('.'); } catch { }
+                        
+                        if (thumbnailExtensions.Contains(ext, StringComparer.OrdinalIgnoreCase) || thumbnailExtensions.Length == 0)
                         {
-                            filesList.Add(subFiles);
+                            yield return file;
                         }
                     }
                 }
-                catch (Exception) {  } // Do nothing
-                if (filesList.Count > 0) yield return new Tuple<int, List<string>>(filesList.Count, filesList);
+
+                // 2. Queue Subdirectories if recursive
+                if (recursive)
+                {
+                    IEnumerable<string> subDirs = null;
+                    try
+                    {
+                        subDirs = Directory.EnumerateDirectories(currentDir);
+                    }
+                    catch (Exception) { }
+
+                    if (subDirs != null)
+                    {
+                        foreach (var dir in subDirs)
+                        {
+                            dirs.Enqueue(dir);
+                        }
+                    }
+                }
             }
         }
     }
 }
-
