@@ -6,6 +6,8 @@ using System.Threading.Tasks;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using System.Threading;
+using System.Runtime.InteropServices;
 
 namespace WinThumbsPreloader
 {
@@ -23,7 +25,7 @@ namespace WinThumbsPreloader
     {
         private DirectoryScanner directoryScanner;
         private ProgressDialog progressDialog;
-        private Timer progressDialogUpdateTimer;
+        private System.Windows.Forms.Timer progressDialogUpdateTimer;
 
         protected bool _multiThreaded;
 
@@ -35,6 +37,10 @@ namespace WinThumbsPreloader
 
         string executablePath = "";
 
+        // Definitions needed for instantiation
+        Guid CLSID_LocalThumbnailCache = new Guid("50ef4544-ac9f-4a8e-b21b-8a26180db13f");
+        Guid IID_IShellItem = new Guid("43826d1e-e718-42ee-bc55-a1e261c37bfe");
+
         public ThumbnailsPreloader(string path, bool includeNestedDirectories, bool silentMode, bool multiThreaded)
         {
             //Set the process priority to Below Normal to prevent system unresponsiveness
@@ -44,13 +50,23 @@ namespace WinThumbsPreloader
             // Single File Mode for when passing a file through the command line or preloading a .svg file
             executablePath = Process.GetCurrentProcess().MainModule.FileName;
             FileAttributes fAt = File.GetAttributes(path);
-            if (!fAt.HasFlag(FileAttributes.Directory)) // path is file and not a directory, so the application had to be run in single file mode:
+            if (!fAt.HasFlag(FileAttributes.Directory)) // path is file and not a directory
             {
-                ThumbnailPreloader.PreloadThumbnail(path); // generating thumbnail
-                Environment.Exit(0); //  done, let's exit this app instance
+                // Instantiate cache just for this single file
+                var TBCacheType = Type.GetTypeFromCLSID(CLSID_LocalThumbnailCache);
+                var tbCache = (ThumbnailPreloader.IThumbnailCache)Activator.CreateInstance(TBCacheType);
+                try 
+                {
+                    ThumbnailPreloader.PreloadThumbnail(path, tbCache, IID_IShellItem); 
+                }
+                finally
+                {
+                    if (tbCache != null) Marshal.ReleaseComObject(tbCache);
+                }
+                Environment.Exit(0);
             }
 
-            // Normal mode for when passing a directory through the command line
+            // Normal mode
             directoryScanner = new DirectoryScanner(path, includeNestedDirectories);
             if (!silentMode)
             {
@@ -108,10 +124,14 @@ namespace WinThumbsPreloader
                     progressDialog.Maximum = totalItemsCount;
                     progressDialog.Marquee = false;
                 }
-                progressDialog.Title = String.Format(Resources.ThumbnailsPreloader_Processing, (processedItemsCount * 100) / totalItemsCount);
+                // Calculate percentage safely
+                int currentCount = processedItemsCount; 
+                int percent = totalItemsCount > 0 ? (currentCount * 100) / totalItemsCount : 0;
+                
+                progressDialog.Title = String.Format(Resources.ThumbnailsPreloader_Processing, percent);
                 progressDialog.Line2 = Resources.ThumbnailsPreloader_Name + ": " + Path.GetFileName(currentFile);
-                progressDialog.Line3 = String.Format(Resources.ThumbnailsPreloader_ItemsRemaining, totalItemsCount - processedItemsCount);
-                progressDialog.Value = processedItemsCount;
+                progressDialog.Line3 = String.Format(Resources.ThumbnailsPreloader_ItemsRemaining, totalItemsCount - currentCount);
+                progressDialog.Value = currentCount;
             }
         }
 
@@ -119,14 +139,13 @@ namespace WinThumbsPreloader
         {
             await Task.Run(() =>
             {
-                //Set the process priority to Below Normal to prevent system unresponsiveness
                 using (Process p = Process.GetCurrentProcess())
                     p.PriorityClass = ProcessPriorityClass.BelowNormal;
 
                 state = ThumbnailsPreloaderState.GettingNumberOfItems;
 
                 List<string> items = new List<string>();
-                foreach (Tuple<int, List<string>> itemsCount in directoryScanner.GetItemsCount()) //Get items and items count
+                foreach (Tuple<int, List<string>> itemsCount in directoryScanner.GetItemsCount())
                 {
                     totalItemsCount = itemsCount.Item1;
                     items = itemsCount.Item2;
@@ -138,39 +157,78 @@ namespace WinThumbsPreloader
                     return;
                 }
 
-                state = ThumbnailsPreloaderState.Processing; //Start processing
+                state = ThumbnailsPreloaderState.Processing;
+
                 if (!_multiThreaded)
                 {
-                    foreach (string item in items)
+                    // Single-threaded optimization: Create Cache ONCE
+                    var TBCacheType = Type.GetTypeFromCLSID(CLSID_LocalThumbnailCache);
+                    var tbCache = (ThumbnailPreloader.IThumbnailCache)Activator.CreateInstance(TBCacheType);
+                    
+                    try
                     {
-                        try
-                        {
-                            currentFile = item;
-                            ThumbnailPreloader.PreloadThumbnail(item);
-                            processedItemsCount++;
-                            if (processedItemsCount == totalItemsCount) state = ThumbnailsPreloaderState.Done;
-                            if (state == ThumbnailsPreloaderState.Canceled) Application.Exit();
-                        }
-                        catch (Exception) { } // Do nothing
-                    }
-                }
-                else
-                {
-                    Parallel.ForEach(
-                        items,
-                        new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount },
-                        item =>
+                        foreach (string item in items)
                         {
                             try
                             {
                                 currentFile = item;
-                                ThumbnailPreloader.PreloadThumbnail(item);
-                                processedItemsCount++;
+                                ThumbnailPreloader.PreloadThumbnail(item, tbCache, IID_IShellItem);
+                                
+                                Interlocked.Increment(ref processedItemsCount);
+                                
                                 if (processedItemsCount == totalItemsCount) state = ThumbnailsPreloaderState.Done;
-                                if (state == ThumbnailsPreloaderState.Canceled) Application.Exit();
+                                if (state == ThumbnailsPreloaderState.Canceled) 
+                                {
+                                    Application.Exit();
+                                    return; 
+                                }
                             }
-                            catch (Exception) { } // Do nothing
-                        });
+                            catch (Exception) { } 
+                        }
+                    }
+                    finally
+                    {
+                        if (tbCache != null) Marshal.ReleaseComObject(tbCache);
+                    }
+                }
+                else
+                {
+                    // Multi-threaded optimization: Create Cache ONCE PER THREAD
+                    Parallel.ForEach(
+                        items,
+                        new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount },
+                        // 1. Init: Create the COM instance for this thread
+                        () => 
+                        {
+                            var TBCacheType = Type.GetTypeFromCLSID(CLSID_LocalThumbnailCache);
+                            return (ThumbnailPreloader.IThumbnailCache)Activator.CreateInstance(TBCacheType);
+                        },
+                        // 2. Body: Process file using the thread-local cache
+                        (item, loopState, index, tbCache) =>
+                        {
+                            try
+                            {
+                                currentFile = item; // Still racey for UI, but acceptable for display only
+                                ThumbnailPreloader.PreloadThumbnail(item, tbCache, IID_IShellItem);
+                                
+                                Interlocked.Increment(ref processedItemsCount);
+                                
+                                if (processedItemsCount == totalItemsCount) state = ThumbnailsPreloaderState.Done;
+                                if (state == ThumbnailsPreloaderState.Canceled) 
+                                {
+                                    loopState.Stop();
+                                    Application.Exit();
+                                }
+                            }
+                            catch (Exception) { } 
+                            return tbCache; // Pass cache to next iteration
+                        },
+                        // 3. Finally: Cleanup COM instance for this thread
+                        (tbCache) => 
+                        {
+                             if (tbCache != null) Marshal.ReleaseComObject(tbCache);
+                        }
+                    );
                 }
             });
             Application.Exit();
