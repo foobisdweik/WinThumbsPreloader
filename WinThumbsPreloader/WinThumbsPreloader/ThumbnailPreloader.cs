@@ -6,38 +6,35 @@ namespace WinThumbsPreloader
     //Preload one thumbnail
     class ThumbnailPreloader
     {
-        public static void PreloadThumbnail(string filePath)
+        // Now accepts the cache and GUIDs as arguments to allow reuse
+        public static void PreloadThumbnail(string filePath, IThumbnailCache TBCache, Guid iIdIShellItem)
         {
+            IShellItem shellItem = null;
+            ISharedBitmap bmp = null;
+            WTS_CACHEFLAGS cFlags;
+            WTS_THUMBNAILID bmpId;
+            
+            try
             {
-                Guid iIdIShellItem;
-                iIdIShellItem = new Guid("43826d1e-e718-42ee-bc55-a1e261c37bfe");
-                Guid CLSIDLocalThumbnailCache = new Guid("50ef4544-ac9f-4a8e-b21b-8a26180db13f");
-                var TBCacheType = Type.GetTypeFromCLSID(CLSIDLocalThumbnailCache);
-                IThumbnailCache TBCache = (IThumbnailCache)Activator.CreateInstance(TBCacheType);
-
-                IShellItem shellItem = null;
-                ISharedBitmap bmp = null;
-                WTS_CACHEFLAGS cFlags;
-                WTS_THUMBNAILID bmpId;
-                try
-                {
-                    SHCreateItemFromParsingName(filePath, IntPtr.Zero, iIdIShellItem, out shellItem);
-                    TBCache.GetThumbnail(shellItem, 128, WTS_FLAGS.WTS_EXTRACTINPROC, out bmp, out cFlags, out bmpId);
-                }
-                catch (Exception)
-                {
-                    // Do nothing
-                }
-                finally
-                {
-                    if (bmp != null) Marshal.ReleaseComObject(bmp);
-                    if (shellItem != null) Marshal.ReleaseComObject(shellItem);
-                    if (TBCache != null) Marshal.ReleaseComObject(TBCache);
-                    bmp = null;
-                    shellItem = null;
-                    TBCache = null;
-                }
-            };
+                // We do NOT create the TBCache here anymore. It is passed in.
+                
+                SHCreateItemFromParsingName(filePath, IntPtr.Zero, iIdIShellItem, out shellItem);
+                TBCache.GetThumbnail(shellItem, 128, WTS_FLAGS.WTS_EXTRACTINPROC, out bmp, out cFlags, out bmpId);
+            }
+            catch (Exception)
+            {
+                // Do nothing
+            }
+            finally
+            {
+                // Only release the objects created specifically for this file
+                if (bmp != null) Marshal.ReleaseComObject(bmp);
+                if (shellItem != null) Marshal.ReleaseComObject(shellItem);
+                
+                // DO NOT release TBCache here, as it is reused for the next file
+                bmp = null;
+                shellItem = null;
+            }
         }
 
         //Import native functions
@@ -51,7 +48,7 @@ namespace WinThumbsPreloader
         [ComImport]
         [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
         [Guid("F676C15D-596A-4ce2-8234-33996F445DB1")]
-        interface IThumbnailCache
+        public interface IThumbnailCache
         {
             uint GetThumbnail(
                 [In] IShellItem pShellItem,
@@ -71,7 +68,7 @@ namespace WinThumbsPreloader
         }
 
         [Flags]
-        enum WTS_FLAGS : uint
+        public enum WTS_FLAGS : uint
         {
             WTS_EXTRACT = 0x00000000,
             WTS_INCACHEONLY = 0x00000001,
@@ -85,7 +82,7 @@ namespace WinThumbsPreloader
         }
 
         [Flags]
-        enum WTS_CACHEFLAGS : uint
+        public enum WTS_CACHEFLAGS : uint
         {
             WTS_DEFAULT = 0x00000000,
             WTS_LOWQUALITY = 0x00000001,
@@ -93,7 +90,7 @@ namespace WinThumbsPreloader
         }
 
         [StructLayout(LayoutKind.Sequential, Size = 16), Serializable]
-        struct WTS_THUMBNAILID
+        public struct WTS_THUMBNAILID
         {
             [MarshalAsAttribute(UnmanagedType.ByValArray, SizeConst = 16)]
             byte[] rgbKey;
