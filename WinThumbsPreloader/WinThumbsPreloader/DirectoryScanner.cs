@@ -56,7 +56,7 @@ namespace WinThumbsPreloader
         {
             try
             {
-                foreach (string file in Directory.GetFileSystemEntries(path))
+                foreach (string file in Directory.EnumerateFiles(currentPath)
                 {
                     if (thumbnailExtensions.Contains(new FileInfo(file).Extension.TrimStart('.'), StringComparer.OrdinalIgnoreCase))
                     {
@@ -82,7 +82,7 @@ namespace WinThumbsPreloader
                     {
                         queue.Enqueue(subDir);
                     }
-                    foreach (string subFiles in Directory.GetFiles(currentPath))
+                    foreach (string subFiles in Directory.EnumerateFiles(currentPath))
                     {
                         if (thumbnailExtensions.Contains(new FileInfo(subFiles).Extension.TrimStart('.'), StringComparer.OrdinalIgnoreCase) || thumbnailExtensions.Length == 0)
                         {
@@ -96,3 +96,4 @@ namespace WinThumbsPreloader
         }
     }
 }
+
